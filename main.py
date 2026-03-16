@@ -1,23 +1,23 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import pdfplumber
 import pandas as pd
 import io
 import re
-import json
 
 app = FastAPI()
 
-# Permite que o portal do Lovable acesse esta API
+# Liberação de acesso para o Lovable
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# A sua lista oficial Lecheta integrada
+# --- LISTA OFICIAL LECHETA ---
 CONTEUDO_MAPEAMENTO = """
 COMPRA
 1102
@@ -127,12 +127,63 @@ async def processar_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/exportar")
-async def exportar_excel(dados: list):
-    # Transforma o JSON recebido do Lovable em Excel usando a sua lógica de blocos
-    df = pd.DataFrame(dados)
-    output = io.BytesIO()
-    writer = pd.ExcelWriter(output, engine='xlsxwriter')
-    # ... (Aqui entra a lógica do write_block que já criamos para organizar o Excel)
-    writer.close()
-    output.seek(0)
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=Fechamento_Lecheta.xlsx"})
+async def exportar_excel(dados: list = Body(...)):
+    try:
+        df_temp = pd.DataFrame(dados)
+        output = io.BytesIO()
+        writer = pd.ExcelWriter(output, engine='xlsxwriter')
+        workbook = writer.book
+        worksheet = workbook.add_worksheet("Fechamento")
+        
+        # Formatos Lecheta
+        fmt_h = workbook.add_format({'bold': True, 'bg_color': '#D9EAD3', 'border': 1, 'align': 'center'})
+        fmt_t = workbook.add_format({'bold': True, 'bg_color': '#F4CCCC', 'border': 1, 'num_format': '#,##0.00'})
+        fmt_m = workbook.add_format({'num_format': '#,##0.00', 'border': 1})
+        fmt_l = workbook.add_format({'border': 1, 'align': 'center'})
+
+        def write_block(title, category, start_row, col_idx):
+            data = df_temp[df_temp["categoria"] == category]
+            worksheet.write(start_row, col_idx, title, fmt_h)
+            worksheet.write(start_row, col_idx + 1, "VALOR", fmt_h)
+            curr = start_row + 1; total = 0
+            for _, r in data.iterrows():
+                worksheet.write(curr, col_idx, r["cfop"], fmt_l)
+                worksheet.write(curr, col_idx + 1, r["valor"], fmt_m)
+                total += r["valor"]; curr += 1
+            worksheet.write(curr, col_idx, "TOTAL " + title, fmt_t)
+            worksheet.write(curr, col_idx + 1, total, fmt_t)
+            return curr, total
+
+        # Construção do Layout em Colunas
+        r_c, t_c = write_block("COMPRA", "COMPRA", 1, 0)
+        r_dv, t_dv = write_block("DEVOLUÇÃO VENDA", "DEVOLUÇÃO VENDA", 1, 3)
+        r_br, t_br = write_block("BONIFICAÇÃO RECEITA", "BONIFICAÇÃO RECEITA", r_dv + 2, 3)
+        r_f, t_f = write_block("FRETE", "FRETE", 1, 6)
+        r_im, t_im = write_block("IMOBILIZADO", "IMOBILIZADO", r_br, 6)
+        
+        st_row = max(r_c, r_br, r_im) + 4
+        r_v, t_v = write_block("VENDAS", "VENDAS", st_row, 0)
+        r_bd, t_bd = write_block("BONIFICAÇÃO DESPESA", "BONIFICAÇÃO DESPESA", st_row, 3)
+        r_dc, t_dc = write_block("DEVOLUÇÃO COMPRA", "DEVOLUÇÃO COMPRA", st_row, 6)
+
+        # Totais de Estoque (A14 e A15)
+        worksheet.write(13, 0, "D. ESTOQUE", fmt_h)
+        worksheet.write(13, 1, t_c + t_br, fmt_m)
+        worksheet.write(14, 0, "C. ESTOQUE", fmt_h)
+        worksheet.write(14, 1, t_bd + t_dc, fmt_m)
+
+        worksheet.set_column('A:H', 18)
+        writer.close()
+        output.seek(0)
+        
+        return StreamingResponse(
+            output, 
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=Fechamento_Lecheta.xlsx"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
