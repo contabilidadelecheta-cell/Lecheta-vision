@@ -3,6 +3,7 @@ uvicorn
 pdfplumber
 pandas
 xlsxwriter
-python-multipart
+openpyxl
 thefuzz
 python-Levenshtein
+python-multipart
