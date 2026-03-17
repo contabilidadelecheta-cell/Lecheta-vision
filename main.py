@@ -186,71 +186,77 @@ async def exportar_excel(dados: list = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- NOVA ROTA: CONFERÊNCIA DE VALORES (CARD NOVO) ---
 @app.post("/conferir")
 async def conferir_valores(pdf_file: UploadFile = File(...), xlsx_file: UploadFile = File(...)):
     try:
-        # 1. LER PDF
+        # 1. TENTAR LER PDF
         pdf_content = await pdf_file.read()
         dados_pdf = []
         with pdfplumber.open(io.BytesIO(pdf_content)) as pdf:
-            # Extrai o texto da primeira página
-            text = pdf.pages[0].extract_text()
-            # Regex que busca: Nome (letras) + Espaço + Valor (números com vírgula/ponto)
-            matches = re.findall(r'([A-Za-zÀ-ÿ\s]+)\s+([\d\.,]+)', text)
+            page_text = pdf.pages[0].extract_text()
+            if not page_text:
+                raise Exception("O PDF parece ser uma imagem ou está vazio. Não consegui extrair texto.")
+            
+            # Regex melhorada para nomes com acento e espaços
+            matches = re.findall(r'([A-Za-zÀ-ÿ\s]{3,})\s+([\d\.,]+)', page_text)
             for m in matches:
                 nome = m[0].strip()
-                # Limpa o valor para float (remove ponto de milhar e troca vírgula por ponto)
-                valor_str = m[1].replace('.', '').replace(',', '.')
-                if len(nome) > 3: 
-                    try: dados_pdf.append({"nome": nome, "valor": float(valor_str)})
-                    except: continue
+                val_clean = m[1].replace('.', '').replace(',', '.')
+                try:
+                    dados_pdf.append({"nome": nome, "valor": float(val_clean)})
+                except:
+                    continue
 
-        # 2. LER EXCEL
+        if not dados_pdf:
+            raise Exception("Nenhum dado (Nome/Valor) foi encontrado no PDF. Verifique o formato.")
+
+        # 2. TENTAR LER EXCEL
         xlsx_content = await xlsx_file.read()
         df_xlsx = pd.read_excel(io.BytesIO(xlsx_content))
-        # Padroniza nomes das colunas para maiúsculo para evitar erro de digitação
+        
+        # Limpeza radical de colunas
         df_xlsx.columns = [str(c).upper().strip() for c in df_xlsx.columns]
         
-        # 3. CRUZAMENTO INTELIGENTE (FUZZY MATCHING)
-        relatorio = []
-        # Tenta encontrar colunas que contenham 'NOME' ou 'RAZAO' e 'VALOR'
-        col_nome = [c for c in df_xlsx.columns if 'NOME' in c or 'RAZAO' in c or 'CLIENTE' in c][0]
-        col_valor = [c for c in df_xlsx.columns if 'VALOR' in c or 'TOTAL' in c or 'SALDO' in c][0]
-        
+        # Busca inteligente de colunas
+        col_nome = next((c for c in df_xlsx.columns if any(k in c for k in ['NOME', 'RAZAO', 'CLIENTE', 'APELIDO'])), None)
+        col_valor = next((c for c in df_xlsx.columns if any(k in c for k in ['VALOR', 'TOTAL', 'LIQUIDO', 'SALDO'])), None)
+
+        if not col_nome or not col_valor:
+            raise Exception(f"Colunas não encontradas. Achei apenas: {list(df_xlsx.columns)}")
+
+        # 3. CRUZAMENTO
         nomes_excel = df_xlsx[col_nome].astype(str).tolist()
+        relatorio = []
 
         for item in dados_pdf:
-            # Compara o nome do PDF com todos os nomes do Excel (Semelhança de 75%)
             match = process.extractOne(item['nome'], nomes_excel, scorer=fuzz.token_set_ratio)
             
             if match and match[1] >= 75:
-                nome_encontrado = match[0]
-                # Pega o valor correspondente no Excel
-                valor_excel = float(df_xlsx.loc[df_xlsx[col_nome] == nome_encontrado, col_valor].values[0])
-                diferenca = round(item['valor'] - valor_excel, 2)
-                
-                relatorio.append({
-                    "pdf_nome": item['nome'],
-                    "excel_nome": nome_encontrado,
-                    "pdf_valor": item['valor'],
-                    "excel_valor": valor_excel,
-                    "diferenca": diferenca,
-                    "status": "OK" if abs(diferenca) < 0.05 else "ERRO"
-                })
+                nome_match = match[0]
+                # Pega o primeiro valor encontrado para esse nome
+                try:
+                    linha = df_xlsx[df_xlsx[col_nome] == nome_match].iloc[0]
+                    val_excel = float(linha[col_valor])
+                    dif = round(item['valor'] - val_excel, 2)
+                    relatorio.append({
+                        "pdf_nome": item['nome'], "excel_nome": nome_match,
+                        "pdf_valor": item['valor'], "excel_valor": val_excel,
+                        "diferenca": dif, "status": "OK" if abs(dif) < 0.05 else "ERRO"
+                    })
+                except:
+                    continue
             else:
                 relatorio.append({
-                    "pdf_nome": item['nome'],
-                    "excel_nome": "NÃO ENCONTRADO",
-                    "pdf_valor": item['valor'],
-                    "excel_valor": 0,
-                    "diferenca": item['valor'],
-                    "status": "AUSENTE"
+                    "pdf_nome": item['nome'], "excel_nome": "NÃO ENCONTRADO",
+                    "pdf_valor": item['valor'], "excel_valor": 0,
+                    "diferenca": item['valor'], "status": "AUSENTE"
                 })
 
         return {"comparativo": relatorio}
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro na conferência: {str(e)}")
+        # ISSO AQUI VAI TE DIZER O ERRO REAL NO SWAGGER
+        raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
