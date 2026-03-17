@@ -4,3 +4,5 @@ pdfplumber
 pandas
 xlsxwriter
 python-multipart
+thefuzz
+python-Levenshtein
